@@ -525,6 +525,7 @@ echo "# Where nanobsd additional files live under the source tree"
 echo "NANO_TOOLS=\"${PROJECT_DIR}\""
 echo "NANO_OBJ=\"${NANO_OBJ}\""
 echo "NANO_DIRS_INSTALL=\"${NANO_DIRS_INSTALL}\""
+echo "NANO_DISK_SCHEME=\"${NANO_DISK_SCHEME}\""
 } >> /tmp/${PROJECT}.nano
 
 # Copy the common nanobsd configuration file to /tmp
@@ -542,13 +543,20 @@ echo "NANO_IMGNAME=\"${NAME}-${VERSION}-full-${NANO_KERNEL}${INPUT_CONSOLE}.img\
 echo "# Kernel config file to use"
 echo "NANO_KERNEL=${NANO_KERNEL}"
 
-# Set physical disk layout for generic USB of 256MB (244MiB)
-# Explanation:  Vendors baddly convert 256 000 000 Byte as 256MB
-#               But, 256 000 000 Byte is 244MiB
-# This function will set the variable NANO_MEDIASIZE, NANO_SECTS, NANO_HEADS
-# Warning : using generic-fdd (heads=64 sectors/track=32) create boot problem on WRAP
-echo "# Target disk size"
-echo "UsbDevice generic-hdd ${DISK_SIZE}"
+if [ "${NANO_DISK_SCHEME}" != "gpt" ]; then
+    # Set physical disk layout for generic USB of 256MB (244MiB)
+    # Explanation:  Vendors baddly convert 256 000 000 Byte as 256MB
+    #               But, 256 000 000 Byte is 244MiB
+    # This function will set the variable NANO_MEDIASIZE, NANO_SECTS, NANO_HEADS
+    # Warning : using generic-fdd (heads=64 sectors/track=32) create boot problem on WRAP
+    echo "# Target disk size"
+    echo "UsbDevice generic-hdd ${DISK_SIZE}"
+else
+    echo "NANO_DISK_SIZE=${DISK_SIZE}"
+    echo "NANO_ROOT=1"
+    echo "NANO_SLICE_CFG=cfg"
+    echo "NANO_SLICE_DATA=data"
+fi
 
 echo "# Parallel Make"
 # Special ARCH commands

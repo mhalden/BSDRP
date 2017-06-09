@@ -172,9 +172,18 @@ NANO_BOOT0CFG="-o packet -s 1 -m 3 -t 18"
 # Can be "file" or "swap"
 NANO_MD_BACKING="file"
 
+# If using GPT partition table, install EFI loader
+# currently off as the EFI loader does not respect
+# the GPT bootme flag and always boots the first partition.
+NANO_GPT_INSTALL_EFI=0
+
 # Label name
 # Alphacharacter only
 NANO_LABEL=${NANO_NAME}
+
+if [ "$NANO_DISK_SCHEME" = gpt ]; then
+	NANO_DRIVE=gpt/${NANO_LABEL}
+fi
 
 # Progress Print level
 PPLEVEL=3
@@ -562,7 +571,10 @@ bsdrp_custom () {
 	# turn on noatime for /cfg
 	sed -i "" -e "/cfg/s/rw/rw,noatime/" ${NANO_WORLDDIR}/etc/fstab
 	# Add /data partition to fstab (config script use it for archiving old configurations)
-	echo "/dev/ufs/${NANO_LABEL}s4 /data ufs rw,noauto,failok 2 2" >> ${NANO_WORLDDIR}/etc/fstab
+	[ "$NANO_DISK_SCHEME" = "gpt" ] && \
+		NANO_DATA_DISK=/dev/${NANO_DRIVE}${NANO_SLICE_DATA:-data} || \
+		NANO_DATA_DISK=/dev/ufs/${NANO_LABEL}${NANO_SLICE_DATA:-s4}
+	echo "${NANO_DATA_DISK} /data ufs rw,noauto,failok 2 2" >> ${NANO_WORLDDIR}/etc/fstab
 	# There is a problem around june 2014 with nanobsd: It didn't generate anymore the /data directory
 	[ -d ${NANO_WORLDDIR}/data ] || mkdir -p ${NANO_WORLDDIR}/data
 
@@ -641,9 +653,6 @@ usr/libdata/ldscripts
 
 	# Remove some files
     FILES_TO_REMOVE='
-boot/boot1.efi
-boot/boot1.efifat
-boot/loader.efi
 sbin/hastd
 sbin/hastctl
 usr/sbin/bsdconfig
@@ -661,6 +670,17 @@ usr/local/etc/rc.d/freevrrpd.sh.sample
 usr/share/misc/magic.mgc
 usr/share/misc/termcap.db
 '
+
+	if [ "${NANO_DISK_SCHEME}" != "gpt" ]; then
+		# We only need these when using gpt
+		FILES_TO_REMOVE="
+boot/boot1.efi
+boot/boot1.efifat
+boot/loader.efi
+$FILES_TO_REMOVE
+"
+	fi
+
     for c in ${FILES_TO_REMOVE}
     do
         if [ -f ${NANO_WORLDDIR}/$c ]
@@ -904,3 +924,128 @@ customize_cmd cust_allow_ssh_root
 # Secure BSDRP
 # TO DO: secure the BSDRP (chflags)
 #customize_cmd bsdrp_secure
+
+sectors_to_bytes() {
+	if echo "$1" | grep -iq '[kMGTP]' ; then
+		# Just use the value if it contains a size suffix
+		echo "$1"
+	else
+		# Convert sectors to bytes otherwise
+		echo "${1} * 512" | bc
+	fi
+}
+
+md_unmount() {
+	umount $MNT || :
+	mdconfig -d -u $md
+}
+
+# create GPT diskimage
+create_diskimage() {
+	pprint 2 "Building GPT image"
+	pprint 3 "log: ${NANO_LOG}/_.di"
+
+	(
+		# Clean up any leftover from earlier
+		for f in p1 p2 p3 p4 p5 p6 disk.image; do
+			rm -f "${NANO_LOG}/_.$f"
+		done
+
+		# Make sure _.empty exists and is empty
+		rm -rf "${NANO_LOG}/_.empty"
+		mkdir -p ${NANO_LOG}/_.empty
+
+		MNT=${NANO_LOG}/_.mnt
+
+		# Make sure $MNT exists and is not a mountpoint
+		mkdir -p "$MNT"
+		umount $MNT || :
+
+		# Convert sizes for code, conf and data to something makefs understands
+		if [ "$NANO_CODESIZE" = 0 ]; then
+			NANO_CODESIZE=
+		else
+			NANO_CODESIZE="$(sectors_to_bytes "${NANO_CODESIZE}")"
+		fi
+
+		if [ "$NANO_CONFSIZE" = 0 ]; then
+			NANO_CONFSIZE=
+		else
+			NANO_CONFSIZE="$(sectors_to_bytes "${NANO_CONFSIZE}")"
+		fi
+
+		if [ "$NANO_DATASIZE" = 0 ]; then
+			NANO_DATASIZE=
+		elif [ "$NANO_DATASIZE" = -1 ]; then
+			:
+		else
+			NANO_DATASIZE="$(sectors_to_bytes "${NANO_DATASIZE}")"
+		fi
+
+		# Create code partition 1
+		makefs -B little -t ffs ${NANO_CODESIZE:+-s $NANO_CODESIZE} ${NANO_LOG}/_.p3 ${NANO_WORLDDIR}
+
+		# Create code partition 2
+		if [ "$NANO_INIT_IMG2" -ne "0" ]; then
+			# Create partition containing actual data for code partition 2
+			makefs -B little -t ffs ${NANO_CODESIZE:+-s $NANO_CODESIZE} ${NANO_LOG}/_.p4 ${NANO_WORLDDIR}
+			md=$(mdconfig -a -t vnode -f ${NANO_LOG}/_.p4)
+			trap md_unmount 1 2 15
+			mount /dev/$md $MNT
+
+			# Make sure the right partition is mounted when booting from partition 2
+			sed -i "" -e /${NANO_LABEL}1/s/${NANO_LABEL}1/${NANO_LABEL}2/ $MNT/etc/fstab
+			md_unmount
+			trap - 1 2 15
+		else
+			# Create empty dummy for code partition 2
+			NANO_CODESIZE2=$(stat -f "%z" ${NANO_LOG}/_.p3)
+			makefs -B little -t ffs -s ${NANO_CODESIZE:-$NANO_CODESIZE2} ${NANO_LOG}/_.p4 ${NANO_LOG}/_.empty
+		fi
+
+		# Create config partition
+		makefs -B little -t ffs -s ${NANO_CONFSIZE:-32m} ${NANO_LOG}/_.p5 ${NANO_LOG}/_.empty
+
+		# Create data partition
+		if [ "$NANO_DATASIZE" != -1 ]; then
+			makefs -B little -t ffs -S-s ${NANO_DATASIZE:-32m} ${NANO_LOG}/_.p6 ${NANO_LOG}/_.empty
+			dataopts="-p freebsd-ufs/${NANO_LABEL}data:=${NANO_LOG}/_.p6"
+		else
+			dataopts=""
+		fi
+
+		# _.p3 contains the upgrade image
+		ln ${NANO_LOG}/_.p3 ${NANO_LOG}/_.disk.image
+
+		md=$(mdconfig -a -t vnode -f ${NANO_LOG}/_.p3)
+
+		trap md_unmount 1 2 15
+		mount /dev/$md $MNT
+
+		(
+			cd ${MNT}
+			mtree -c
+		) >${NANO_LOG}/_.mtree
+
+		md_unmount
+		trap - 1 2 15
+
+		# Add efi loader if necessary
+		if [ "${NANO_GPT_INSTALL_EFI}" = 0 ]; then
+			efiopts="efi::1m"
+		else
+			efiopts="efi:=${NANO_WORLDDIR}/boot/boot1.efifat"
+		fi
+
+		# Create the actual disk image
+		mkimg -s gpt -b ${NANO_WORLDDIR}/boot/pmbr \
+			-p ${efiopts} \
+			-p freebsd-boot:=${NANO_WORLDDIR}/boot/gptboot \
+			-p freebsd-ufs/${NANO_LABEL}1:=${NANO_LOG}/_.p3 \
+			-p freebsd-ufs/${NANO_LABEL}2:=${NANO_LOG}/_.p4 \
+			-p freebsd-ufs/${NANO_LABEL}cfg:=${NANO_LOG}/_.p5 \
+			$dataopts \
+			-c ${NANO_DISK_SIZE}m \
+			-o ${NANO_LOG}/${NANO_IMGNAME}
+	) > ${NANO_LOG}/_.di 2>&1
+}
