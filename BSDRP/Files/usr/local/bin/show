@@ -160,8 +160,8 @@ authors () {
 disk () {
 	. /etc/nanobsd.conf
 	echo "Label to disk mapping:"
-	glabel status | head -1 ; glabel status | grep ufs/BSDRP
-	disk=`glabel status | grep "${NANO_DRIVE}s[12]a" | awk '{ s=$3; sub(/s[12]a$/, "", s); print s; }'`
+	glabel status | head -1 ; glabel status | grep -E '(ufs|gpt)/BSDRP'
+	disk=`glabel status | grep -E "${NANO_DRIVE}(s[12]a|[12])" | awk '{ s=$3; sub(/s[12]a$/, "", s); sub(/p[34]$/, "", s); print s; }' | sort -u`
 	echo "Partitions on disk ${disk}:"
 	gpart show $disk
 }
